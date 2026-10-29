@@ -314,7 +314,7 @@ Payload que não forma o agregado não abre `wager_transactions` nem ledger. Na 
 
 ## Schema proposto
 
-Desenho para a migration. Não executado.
+Schema da migration `Migration20261029160100_Financial`.
 
 ### wallets
 
@@ -375,11 +375,13 @@ Identificadores de agregado, transação e evento: UUIDv7. Cursor do ledger: key
 
 ## Migrations
 
-O desenho são duas migrations versionadas. A migration financeira da fase 3 não foi gerada nem executada.
+Há três migrations versionadas. Nenhuma altera D1–D14.
 
-A da fase 1 está em `src/persistence/migrations/Migration20261029143000_Empty.ts`. Sobe e desce com `select 1`. O runner cria só `mikro_orm_migrations`. Não cria coluna de dinheiro.
+A da fase 1 está em `src/persistence/migrations/Migration20261029143000_Empty.ts`. Sobe e desce com `select 1`. Não cria coluna de dinheiro.
 
-A segunda, na fase 3, cria o schema financeiro nesta ordem: `wallets`, `wager_transactions`, `wallet_ledger_entries`, `inbox_messages`, `outbox_messages`, `ingress_rejects`, índices parciais e, por último, os triggers. `down` remove os triggers, depois os índices e as tabelas na ordem inversa. Não há `UPDATE` de dados. O papel da aplicação não é dono das tabelas, para o trigger do ledger valer sobre ele. `TRUNCATE` não faz parte do papel da aplicação.
+`Migration20261029160000_AppRole` cria o papel `wager_app`. Fica fora de transação porque `CREATE ROLE` e `DROP ROLE` recusam bloco. O `down` revoga os privilégios e remove o papel. Não remove o papel enquanto existir sessão com ele.
+
+`Migration20261029160100_Financial` cria o schema nesta ordem: `wallets`, `wager_transactions`, `wallet_ledger_entries`, `inbox_messages`, `outbox_messages`, `ingress_rejects`, índices parciais e, por último, os triggers. `down` remove os triggers, as funções, os índices e as tabelas na ordem inversa. Não há `UPDATE` de dados. O papel da aplicação não é dono das tabelas, para o trigger do ledger valer sobre ele. `TRUNCATE` não faz parte do papel da aplicação. As migrations confirmam uma a uma: o papel e o schema não compartilham a mesma transação.
 
 ## Observabilidade
 

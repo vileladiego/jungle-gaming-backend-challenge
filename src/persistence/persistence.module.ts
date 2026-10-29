@@ -8,7 +8,7 @@ import {
   type DynamicModule,
   type OnApplicationShutdown,
 } from '@nestjs/common';
-import { buildMikroOrmConfig } from './mikro-orm.config';
+import { buildRuntimeMikroOrmConfig } from './mikro-orm.config';
 
 @Injectable()
 class CloseOrmOnShutdown implements OnApplicationShutdown {
@@ -23,7 +23,7 @@ class CloseOrmOnShutdown implements OnApplicationShutdown {
 @Module({})
 export class PersistenceModule {
   static async register(): Promise<DynamicModule> {
-    const mikroOrm = await MikroOrmModule.forRoot(buildMikroOrmConfig());
+    const mikroOrm = await MikroOrmModule.forRoot(buildRuntimeMikroOrmConfig());
     return {
       module: PersistenceModule,
       global: true,

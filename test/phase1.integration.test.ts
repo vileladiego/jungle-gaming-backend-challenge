@@ -9,6 +9,7 @@ import { ensureQueues } from '../src/messaging/ensure-queues';
 import { createSqsClient } from '../src/messaging/sqs-client';
 import { probeSqs } from '../src/messaging/sqs-probe';
 import { probePostgres } from '../src/persistence/postgres-probe';
+import { holdSchemaLock } from './support/database-lock';
 import {
   WAGER_DOMAIN_EVENTS_QUEUE,
   WAGER_TRANSACTIONS_DLQ,
@@ -29,9 +30,12 @@ describe('Fase 1', () => {
   let app: INestApplication | undefined;
   let baseUrl: string;
   let sqs: SQSClient | undefined;
+  let release: (() => Promise<void>) | undefined;
 
   beforeAll(async () => {
+    release = await holdSchemaLock();
     orm = await MikroORM.init(buildMikroOrmConfig());
+    await orm.migrator.up();
     sqs = createSqsClient();
     app = await NestFactory.create(AppModule, { logger: false });
     await app.listen(0, '127.0.0.1');
@@ -46,16 +50,19 @@ describe('Fase 1', () => {
     await app?.close();
     sqs?.destroy();
     await orm?.close(true);
+    await release?.();
   });
 
-  test('migration vazia sobe e desce sem tabela financeira', async () => {
+  test('schema financeiro sobe e desce até o papel da aplicação', async () => {
     if (orm === undefined || sqs === undefined) {
       throw new Error('Infrastructure clients were not started');
     }
     const migrator = orm.migrator;
-    await migrator.up();
+    await migrator.down({ to: 'Migration20261029160100_Financial' });
     await expectNoFinancialSchema(orm);
-    await migrator.down();
+    await migrator.up();
+    await expectFinancialSchema(orm);
+    await migrator.down({ to: 'Migration20261029160100_Financial' });
     await expectNoFinancialSchema(orm);
     await migrator.up();
   }, 30_000);
@@ -129,6 +136,13 @@ describe('Fase 1', () => {
     }
   });
 });
+
+async function expectFinancialSchema(orm: MikroORM): Promise<void> {
+  const tables = await publicTables(orm);
+  for (const name of FINANCIAL_TABLES) {
+    expect(tables).toContain(name);
+  }
+}
 
 async function expectNoFinancialSchema(orm: MikroORM): Promise<void> {
   const tables = await publicTables(orm);
