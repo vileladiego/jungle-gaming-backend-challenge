@@ -336,7 +336,7 @@ Partidas dobradas, OpenTelemetry, dashboard, Identity Provider real e teste de c
 
 ## 6. Matriz de testes
 
-Todo teste de integração e de concorrência termina com a cadeia do ledger íntegra: cada lançamento fecha `balance_before ± amount = balance_after`, o último `balance_after` é o saldo da wallet, e a ausência de lançamento mantém o saldo inicial. `LOSS` e `REJECTED` não criam linha. PostgreSQL e LocalStack são reais. Nenhum teste abaixo foi executado.
+Todo teste de integração e de concorrência termina com a cadeia do ledger íntegra: cada lançamento fecha `balance_before ± amount = balance_after`, o último `balance_after` é o saldo da wallet, e a ausência de lançamento mantém o saldo inicial. `LOSS` e `REJECTED` não criam linha. PostgreSQL e LocalStack são reais. Os testes de unidade da fase 2 foram executados. Integração e concorrência da matriz abaixo continuam por executar.
 
 O perfil de teste de D11 encurta TTL, tentativas e backoff. O default operacional permanece o da tabela de D11.
 

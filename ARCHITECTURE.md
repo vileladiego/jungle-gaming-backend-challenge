@@ -4,7 +4,7 @@ Status: decisões D1–D14 reescritas com as condições da revisão de Tech Lea
 
 A fase 1 está implementada: Bun 1.4, NestJS 11, TypeScript strict, MikroORM 6.6, PostgreSQL 16.10, LocalStack 4.7, três filas FIFO, a migration vazia reversível e `GET /health/live` e `GET /health/ready`. Comandos e resultado da validação estão em `docs/setup.md`.
 
-Money, Wallet, Ledger, apostas, Inbox e Outbox continuam fora. O schema financeiro abaixo continua desenho e não foi migrado.
+A fase 2 está no domínio puro: `Money`, `Wallet`, `WalletLedgerEntry` e `WagerTransaction`, com testes de unidade. Não há migration financeira, controller de negócio, SQS, worker, Inbox, Outbox nem persistência desses agregados. O schema financeiro abaixo continua desenho e não foi migrado.
 
 Fonte de verdade do enunciado: `README.md`. Onde este arquivo aperta ou completa o enunciado, a diferença está na seção [Divergências](#divergências-em-relação-ao-readme).
 

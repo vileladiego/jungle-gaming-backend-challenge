@@ -27,6 +27,7 @@
     "@nestjs/core": "11",
     "@nestjs/platform-express": "11",
     "ajv": "8",
+    "decimal.js": "10",
     "pg": "^8.23.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2"
