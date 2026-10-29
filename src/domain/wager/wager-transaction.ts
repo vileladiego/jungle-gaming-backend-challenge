@@ -258,6 +258,16 @@ export class WagerTransaction {
     this.#attemptCount = 0;
   }
 
+  /**
+   * Troca só o prazo já persistível. O relógio da submissão não é o do PostgreSQL.
+   * Não mexe em status, saldo, contador nem snapshot.
+   */
+  alignPendingSchedule(nextAttemptAt: Date, deadlineAt: Date): void {
+    this.assertStatus('PENDING_REFERENCE');
+    this.#nextAttemptAt = new Date(nextAttemptAt.getTime());
+    this.#deadlineAt = new Date(deadlineAt.getTime());
+  }
+
   reject(code: FailureCode, at: Date, observedBalance?: Money): void {
     this.assertOpen();
     if (!isPersistedRejection(code)) {

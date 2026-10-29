@@ -4,6 +4,12 @@ A migration `Migration20261029160100_Financial` materializa o schema de `ARCHITE
 
 `NUMERIC(20,2)` entra e sai como string. O tipo `NumericStringType` recusa `number`.
 
+`PENDING_REFERENCE` grava `attempt_count = 0`. `next_attempt_at` e `deadline_at` saem de `now()` do PostgreSQL na mesma sentença: o prazo é `now() + ttl`. O padrão é 15 minutos. `REFERENCE_TTL_MS` só existe para o perfil de teste. `created_at` e `processed_at` continuam no relógio recebido pelo caso de uso, para o teste fixar o instante de negócio. Replay não reescreve o prazo.
+
+`FAILED` só é gravado quando `persistsAsFailed` é verdadeiro: constraint `23505` ou `23514` cujo nome o código não reconhece. Timeout, deadlock, serialização, unicidade conhecida, check de saldo, estouro `22003` e trigger de imutabilidade não entram nesse ramo.
+
+As constraints da migration nascem validadas. `NOT VALID` não faz parte do schema. Um banco novo aceita o mesmo predicado de prova (`status <> 'PROCESSED'`) já validado, porque a tabela ainda está vazia.
+
 ## Ordem de locks
 
 Uma transação financeira trava no máximo uma wallet. A ordem é fixa:

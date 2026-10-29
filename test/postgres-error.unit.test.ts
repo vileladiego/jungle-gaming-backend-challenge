@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { classifyPostgresError } from '../src/persistence/postgres-error';
+import { classifyPostgresError, persistsAsFailed } from '../src/persistence/postgres-error';
 
 describe('classificação de erro do Postgres', () => {
   test('timeout, deadlock e serialização são transitórios', () => {
@@ -49,6 +49,28 @@ describe('classificação de erro do Postgres', () => {
       name: '',
       code: '23505',
     });
+  });
+
+  test('só constraint desconhecida persiste FAILED', () => {
+    expect(persistsAsFailed(classifyPostgresError({ code: '40P01' }))).toBe(false);
+    expect(persistsAsFailed(classifyPostgresError({ code: '55P03' }))).toBe(false);
+    expect(persistsAsFailed(classifyPostgresError({ code: '57014' }))).toBe(false);
+    expect(persistsAsFailed(classifyPostgresError({ code: '40001' }))).toBe(false);
+    expect(persistsAsFailed(classifyPostgresError({ code: '22003' }))).toBe(false);
+    expect(
+      persistsAsFailed(classifyPostgresError({ code: '23505', constraint: 'uq_wager_transactions_idempotency_key' })),
+    ).toBe(false);
+    expect(
+      persistsAsFailed(classifyPostgresError({ code: '23505', constraint: 'ux_reversal_once' })),
+    ).toBe(false);
+    expect(
+      persistsAsFailed(classifyPostgresError({ code: '23514', constraint: 'ck_wallets_balance_nonnegative' })),
+    ).toBe(false);
+    expect(
+      persistsAsFailed(classifyPostgresError({ code: '23514', constraint: 'wallet_ledger_entries_append_only' })),
+    ).toBe(false);
+    expect(persistsAsFailed(classifyPostgresError({ code: '23514', constraint: 'ck_phase3_probe' }))).toBe(true);
+    expect(persistsAsFailed(classifyPostgresError({ code: '23505' }))).toBe(true);
   });
 
   test('lê code e constraint dentro de cause', () => {

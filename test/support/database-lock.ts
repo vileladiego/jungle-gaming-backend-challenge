@@ -11,7 +11,7 @@ export async function holdSchemaLock(): Promise<() => Promise<void>> {
   if (url === undefined || url === '') {
     throw new Error('DATABASE_URL is required for the schema lock');
   }
-  const client = new Client({ connectionString: url });
+  const client = new Client({ connectionString: url, connectionTimeoutMillis: 3000 });
   await client.connect();
   await client.query('select pg_advisory_lock($1)', [LOCK_KEY]);
   return async () => {

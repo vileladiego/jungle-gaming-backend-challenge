@@ -33,7 +33,7 @@ describe('Fase 3', () => {
     appClient = new Client({ connectionString: process.env.DATABASE_APP_URL });
     await ownerClient.connect();
     await appClient.connect();
-  });
+  }, 120_000);
 
   afterAll(async () => {
     await appClient?.end();
@@ -81,6 +81,30 @@ describe('Fase 3', () => {
     );
     expect(currency[0]?.data_type).toBe('character varying');
     expect(currency[0]?.character_maximum_length).toBe(3);
+    const unvalidated = await ownerQuery<{ conname: string }>(
+      `select conname
+         from pg_constraint
+        where connamespace = 'public'::regnamespace
+          and convalidated = false`,
+    );
+    expect(unvalidated).toEqual([]);
+    await ownerSql(
+      `alter table wager_transactions add constraint ck_phase3_probe check (status <> 'PROCESSED')`,
+    );
+    const probe = await ownerQuery<{ convalidated: boolean }>(
+      `select convalidated from pg_constraint where conname = 'ck_phase3_probe'`,
+    );
+    expect(probe[0]?.convalidated).toBe(true);
+    await expect(
+      ownerSql(
+        `insert into wager_transactions (
+           id, provider_id, external_transaction_id, idempotency_key, payload_hash, wallet_id, player_id,
+           round_id, game_id, kind, amount, currency, status, attempt_count, created_at
+         ) values ($1, 'prov', 'fresh-probe', 'prov:fresh-probe', 'hash', $2, 'player-fresh', 'round-1', 'game-1', 'BET', 1.00, 'BRL', 'PROCESSED', 0, $3)`,
+        [uuidV7(), uuidV7(), NOW],
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'ck_phase3_probe' });
+    await ownerSql(`alter table wager_transactions drop constraint ck_phase3_probe`);
   }, 30_000);
 
   test('constraints recusam saldo negativo, aritmética inválida e duplicidade', async () => {
@@ -164,6 +188,23 @@ describe('Fase 3', () => {
       return;
     }
     expect(stored.transaction.status).toBe('PENDING_REFERENCE');
+    expect(stored.transaction.attemptCount).toBe(0);
+    const schedule = await appQuery<{ next_attempt_at: Date; deadline_at: Date; attempt_count: number }>(
+      `select next_attempt_at, deadline_at, attempt_count from wager_transactions where id = $1`,
+      [pending.id],
+    );
+    const clock = await appQuery<{ now: Date }>(`select now() as now`);
+    const next = schedule[0]?.next_attempt_at;
+    const deadline = schedule[0]?.deadline_at;
+    const databaseNow = clock[0]?.now;
+    if (next === undefined || deadline === undefined || databaseNow === undefined) {
+      throw new Error('Pending schedule was not stored');
+    }
+    expect(schedule[0]?.attempt_count).toBe(0);
+    const ttl = Number(process.env.REFERENCE_TTL_MS ?? 15 * 60 * 1000);
+    expect(deadline.getTime() - next.getTime()).toBe(ttl);
+    expect(Math.abs(next.getTime() - databaseNow.getTime())).toBeLessThan(5_000);
+    expect(next.toISOString()).not.toBe(NOW.toISOString());
     await expect(
       appSql(`update wager_transactions set amount = 11.00 where id = $1`, [pending.id]),
     ).rejects.toMatchObject({ code: '23514', constraint: 'wager_transactions_immutable' });

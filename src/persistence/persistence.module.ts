@@ -8,6 +8,7 @@ import {
   type DynamicModule,
   type OnApplicationShutdown,
 } from '@nestjs/common';
+import { FinancialStore } from './financial-store';
 import { buildRuntimeMikroOrmConfig } from './mikro-orm.config';
 
 @Injectable()
@@ -28,8 +29,8 @@ export class PersistenceModule {
       module: PersistenceModule,
       global: true,
       imports: [mikroOrm],
-      providers: [CloseOrmOnShutdown],
-      exports: [mikroOrm],
+      providers: [CloseOrmOnShutdown, FinancialStore],
+      exports: [mikroOrm, FinancialStore],
     };
   }
 }

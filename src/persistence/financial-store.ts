@@ -1,5 +1,6 @@
 import { LockMode } from '@mikro-orm/core';
-import { type EntityManager, type MikroORM } from '@mikro-orm/postgresql';
+import { Injectable } from '@nestjs/common';
+import { MikroORM, type EntityManager } from '@mikro-orm/postgresql';
 import { DomainError } from '../domain/domain-error';
 import type { FailureCode } from '../domain/failure-code';
 import { IntegrationEvent } from '../domain/events/integration-event';
@@ -14,7 +15,7 @@ import {
 } from '../domain/wager/wager-transaction';
 import { openWallet } from '../domain/wallet/open-wallet';
 import { Wallet } from '../domain/wallet/wallet';
-import { classifyPostgresError } from './postgres-error';
+import { classifyPostgresError, persistsAsFailed } from './postgres-error';
 import {
   InboxMessageRecord,
   IngressRejectRecord,
@@ -26,7 +27,7 @@ import {
 import { uuidV7 } from './uuid-v7';
 
 const CONSUMER_NAME = 'wager-transactions';
-const REFERENCE_TTL_MS = 15 * 60 * 1000;
+const DEFAULT_REFERENCE_TTL_MS = 15 * 60 * 1000;
 
 export interface OpenWalletCommand {
   id: string;
@@ -76,6 +77,7 @@ export type SubmitWagerPersistenceResult =
       failureCode: 'IDEMPOTENCY_PAYLOAD_MISMATCH' | 'IDEMPOTENCY_KEY_MISMATCH';
     };
 
+@Injectable()
 export class FinancialStore {
   constructor(private readonly orm: MikroORM) {}
 
@@ -145,6 +147,78 @@ export class FinancialStore {
     return record === null ? null : ledgerFrom(record);
   }
 
+  async loadWagerByPair(
+    providerId: string,
+    externalTransactionId: string,
+  ): Promise<WagerTransaction | null> {
+    return findByPair(this.orm.em.fork(), providerId, externalTransactionId);
+  }
+
+  async listLedger(
+    walletId: string,
+    after: { createdAt: string; id: string } | null,
+    limit: number,
+  ): Promise<Array<{ entry: WalletLedgerEntry; cursorCreatedAt: string }>> {
+    const rows = await this.orm.em.fork().getConnection().execute<Array<LedgerRow & { created_at_cursor: string }>>(
+      `select id,
+              wallet_id,
+              transaction_id,
+              direction,
+              amount::text as amount,
+              currency,
+              balance_before::text as balance_before,
+              balance_before_currency,
+              balance_after::text as balance_after,
+              balance_after_currency,
+              created_at,
+              created_at::text as created_at_cursor
+         from wallet_ledger_entries
+        where wallet_id = ?
+          and (
+            cast(? as timestamptz) is null
+            or (created_at, id) > (cast(? as timestamptz), cast(? as uuid))
+          )
+        order by created_at, id
+        limit ?`,
+      [walletId, after?.createdAt ?? null, after?.createdAt ?? null, after?.id ?? null, limit],
+    );
+    return rows.map((row) => ({ entry: ledgerFromRow(row), cursorCreatedAt: row.created_at_cursor }));
+  }
+
+  /**
+   * Trava a wallet e lê o ledger inteiro. Não grava saldo, lançamento nem outbox.
+   */
+  async readForReconciliation(
+    walletId: string,
+  ): Promise<{ wallet: Wallet; entries: WalletLedgerEntry[] } | null> {
+    const em = this.orm.em.fork();
+    return em.transactional(async (tx) => {
+      await setLocalTimeouts(tx);
+      const wallet = await lockWallet(tx, walletId);
+      if (wallet === null) {
+        return null;
+      }
+      const rows = await tx.execute<LedgerRow[]>(
+        `select id,
+                wallet_id,
+                transaction_id,
+                direction,
+                amount::text as amount,
+                currency,
+                balance_before::text as balance_before,
+                balance_before_currency,
+                balance_after::text as balance_after,
+                balance_after_currency,
+                created_at
+           from wallet_ledger_entries
+          where wallet_id = ?
+          order by created_at, id`,
+        [walletId],
+      );
+      return { wallet, entries: rows.map((row) => ledgerFromRow(row)) };
+    });
+  }
+
   private async applySubmission(
     tx: EntityManager,
     command: SubmitWagerCommand,
@@ -194,11 +268,15 @@ export class FinancialStore {
       reference,
       processedReversal,
       now: command.now,
-      deadlineAt: new Date(command.now.getTime() + REFERENCE_TTL_MS),
+      deadlineAt: command.now,
       entryId: uuidV7(),
       correlationId: command.correlationId,
       nextEventId: () => uuidV7(),
     });
+    if (applied.transaction.status === 'PENDING_REFERENCE') {
+      const schedule = await pendingSchedule(tx);
+      applied.transaction.alignPendingSchedule(schedule.nextAttemptAt, schedule.deadlineAt);
+    }
     if (applied.entry !== null) {
       await insertLedger(tx, applied.entry);
     }
@@ -248,7 +326,7 @@ export class FinancialStore {
     if (classified.kind === 'overflow') {
       return this.persistRejection(command, 'AMOUNT_OVERFLOW');
     }
-    if (classified.kind === 'unknown-constraint') {
+    if (persistsAsFailed(classified)) {
       return this.persistFailed(command);
     }
     throw error;
@@ -373,6 +451,45 @@ export class FinancialStore {
 async function setLocalTimeouts(em: EntityManager): Promise<void> {
   await em.execute(`select set_config('lock_timeout', '3s', true)`);
   await em.execute(`select set_config('statement_timeout', '5s', true)`);
+}
+
+function referenceTtlMs(): number {
+  const raw = process.env.REFERENCE_TTL_MS;
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_REFERENCE_TTL_MS;
+  }
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new Error('REFERENCE_TTL_MS must be a positive integer');
+  }
+  return Number(raw);
+}
+
+async function pendingSchedule(
+  em: EntityManager,
+): Promise<{ nextAttemptAt: Date; deadlineAt: Date }> {
+  const rows = await em.execute<
+    Array<{ next_attempt_at: Date | string; deadline_at: Date | string }>
+  >(
+    `select now() as next_attempt_at,
+            now() + (interval '1 millisecond' * ?) as deadline_at`,
+    [referenceTtlMs()],
+  );
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error('PostgreSQL did not return a clock');
+  }
+  return {
+    nextAttemptAt: asDate(row.next_attempt_at),
+    deadlineAt: asDate(row.deadline_at),
+  };
+}
+
+function asDate(value: Date | string): Date {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error('PostgreSQL clock did not return a timestamp');
+  }
+  return parsed;
 }
 
 async function lockWallet(em: EntityManager, id: string): Promise<Wallet | null> {
@@ -619,6 +736,33 @@ function wagerFrom(record: WagerTransactionRecord): WagerTransaction {
     attemptCount: record.attemptCount,
     nextAttemptAt: record.nextAttemptAt ?? undefined,
     deadlineAt: record.deadlineAt ?? undefined,
+  });
+}
+
+interface LedgerRow {
+  id: string;
+  wallet_id: string;
+  transaction_id: string;
+  direction: string;
+  amount: string;
+  currency: string;
+  balance_before: string;
+  balance_before_currency: string;
+  balance_after: string;
+  balance_after_currency: string;
+  created_at: Date | string;
+}
+
+function ledgerFromRow(row: LedgerRow): WalletLedgerEntry {
+  return WalletLedgerEntry.rehydrate({
+    id: row.id,
+    walletId: row.wallet_id,
+    transactionId: row.transaction_id,
+    direction: row.direction as 'DEBIT' | 'CREDIT',
+    amount: { amount: row.amount, currency: row.currency },
+    balanceBefore: { amount: row.balance_before, currency: row.balance_before_currency },
+    balanceAfter: { amount: row.balance_after, currency: row.balance_after_currency },
+    createdAt: row.created_at instanceof Date ? row.created_at : new Date(row.created_at),
   });
 }
 

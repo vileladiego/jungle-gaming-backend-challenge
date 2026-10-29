@@ -44,7 +44,7 @@ describe('Fase 1', () => {
       throw new Error('HTTP server did not bind a TCP port');
     }
     baseUrl = `http://127.0.0.1:${address.port}`;
-  });
+  }, 120_000);
 
   afterAll(async () => {
     await app?.close();

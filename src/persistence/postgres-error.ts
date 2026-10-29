@@ -60,6 +60,11 @@ export function classifyPostgresError(error: unknown): PostgresFailure {
   return { kind: 'other' };
 }
 
+/** D14: só constraint que o código não sabe nomear vira FAILED. */
+export function persistsAsFailed(failure: PostgresFailure): boolean {
+  return failure.kind === 'unknown-constraint';
+}
+
 function readPostgresError(error: unknown): { code?: string; constraint?: string } {
   const seen = new Set<unknown>();
   let current: unknown = error;

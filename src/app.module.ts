@@ -8,8 +8,8 @@ import { PersistenceModule } from './persistence/persistence.module';
 @Module({
   imports: [
     DomainModule,
-    ApplicationModule,
     PersistenceModule.register(),
+    ApplicationModule,
     MessagingModule,
     HealthModule,
   ],
