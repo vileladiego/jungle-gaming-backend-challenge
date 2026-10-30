@@ -395,9 +395,21 @@ Métricas: transações por status, duplicatas, retries, mensagens na DLQ, confl
 
 Partidas dobradas, OpenTelemetry, dashboard, Identity Provider real e teste de carga. O ledger exigido é um lançamento por transação financeira. Carga, se for feita depois, entra como `bun run test:load`, com ambiente, metodologia, throughput, p50/p95/p99, taxa de erro, conflitos de lock e outbox lag. Não há meta de RPS.
 
+## Limitações conhecidas
+
+Nenhuma destas limitações altera D1–D14. Nenhuma foi classificada como bloqueio da correção financeira. O detalhe e a evidência estão em `docs/conformidade.md`.
+
+- `57P03` (PostgreSQL em shutdown) não está na lista de erros transitórios. O worker que estava conectado morre. Um processo iniciado depois não duplica o débito já commitado.
+- `ingress_rejects` não é única por `message_id`. Uma queda entre o insert e a DLQ pode gravar outra linha de auditoria, sem ledger.
+- Duas resoluções de `PENDING_REFERENCE` podem regravar `attempt_count` se a segunda leitura não enxergar o incremento da primeira. O teste do lease subiu o contador e não gerou segundo crédito.
+- A deduplicação por `eventId` persistido existe no consumidor de teste, não no processo da aplicação. A janela de cinco minutos do FIFO não é a garantia.
+- O LocalStack deste Compose não tem volume. Um restart perde a mensagem já aceita pelo SQS. A outbox no PostgreSQL permanece.
+- `AuthGuard` nas rotas financeiras é no-op, como a D2. Health continua aberto.
+- As métricas do §12 ficam na memória do processo. Não há endpoint de exportação.
+
 ## Divergências em relação ao README
 
-Estas leituras estão incorporadas de propósito. A implementação continua bloqueada até o sim desta lista.
+Estas dez leituras foram aprovadas e estão em vigor. O texto de D1–D14 não muda por causa delas.
 
 | # | Texto do README | Decisão | Por quê |
 |---|---|---|---|
