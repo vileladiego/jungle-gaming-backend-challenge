@@ -37,6 +37,7 @@ describe('Fase 4A', () => {
   }, 120_000);
 
   afterAll(async () => {
+    await ownerClient?.query(`alter table wager_transactions drop constraint if exists ck_http_failed_probe`);
     await app?.close();
     await ownerClient?.end();
     await owner?.close(true);
@@ -385,6 +386,69 @@ describe('Fase 4A', () => {
     expect(await count(`select count(*)::text as count from wager_transactions where external_transaction_id = $1`, ['locked-http'])).toBe('0');
     expect(amountOf((await request('GET', `/wallets/${walletId}`)).body.balance)).toBe('100.00');
   }, 20_000);
+
+  test('FAILED responde 500, o replay repete o resultado e não move saldo nem ledger', async () => {
+    const walletId = await openWallet('player-failed-http', '100.00');
+    const ledgerBefore = await count(
+      `select count(*)::text as count from wallet_ledger_entries where wallet_id = $1`,
+      [walletId],
+    );
+    const versionBefore = await count(`select version::text as count from wallets where id = $1`, [walletId]);
+    await ownerSql(`alter table wager_transactions drop constraint if exists ck_http_failed_probe`);
+    await ownerSql(
+      `alter table wager_transactions add constraint ck_http_failed_probe check (status <> 'PROCESSED') not valid`,
+    );
+    try {
+      const failed = await wager(walletId, 'player-failed-http', 'failed-bet', 'BET', '10.00');
+      expect(failed.status).toBe(500);
+      expect(failed.body.status).toBe('FAILED');
+      expect(failed.body.failureCode).toBe('PERSISTENT_STATE_CORRUPT');
+      expect(failed.body.idempotentReplay).toBe(false);
+      const transactionId = text(failed.body.transactionId);
+
+      const replay = await wager(walletId, 'player-failed-http', 'failed-bet', 'BET', '10.00');
+      expect(replay.status).toBe(500);
+      expect(replay.body).toEqual({
+        transactionId,
+        status: 'FAILED',
+        failureCode: 'PERSISTENT_STATE_CORRUPT',
+        idempotentReplay: true,
+      });
+
+      const stored = await request('GET', `/wagering/transactions/${transactionId}`);
+      expect(stored.status).toBe(200);
+      expect(stored.body.status).toBe('FAILED');
+      expect(stored.body.failureCode).toBe('PERSISTENT_STATE_CORRUPT');
+      expect(stored.body.balance).toBeUndefined();
+
+      const wallet = await request('GET', `/wallets/${walletId}`);
+      expect(wallet.status).toBe(200);
+      expect(amountOf(wallet.body.balance)).toBe('100.00');
+      expect(wallet.body.version).toBe(Number(versionBefore));
+      expect(await count(
+        `select count(*)::text as count from wallet_ledger_entries where wallet_id = $1`,
+        [walletId],
+      )).toBe(ledgerBefore);
+      expect(await count(
+        `select count(*)::text as count from wallet_ledger_entries where wallet_id = $1 and direction = 'DEBIT'`,
+        [walletId],
+      )).toBe('0');
+      expect(await count(
+        `select count(*)::text as count from wager_transactions where wallet_id = $1 and kind = 'OPENING' and status = 'PROCESSED'`,
+        [walletId],
+      )).toBe('1');
+      expect(await count(
+        `select count(*)::text as count from wager_transactions where wallet_id = $1 and kind = 'BET' and status = 'FAILED'`,
+        [walletId],
+      )).toBe('1');
+      expect(await count(
+        `select count(*)::text as count from outbox_messages where payload::text like $1`,
+        [`%${transactionId}%`],
+      )).toBe('0');
+    } finally {
+      await ownerSql(`alter table wager_transactions drop constraint if exists ck_http_failed_probe`);
+    }
+  });
 
   async function openWallet(playerId: string, amount: string): Promise<string> {
     const created = await request('POST', '/wallets', {
