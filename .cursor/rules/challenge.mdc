@@ -1,6 +1,0 @@
----
-description: Regras obrigatórias do Jungle Gaming Distributed Wagering Processor
-alwaysApply: true
----
-
-README.md do repositório é fonte de verdade. Stack obrigatória: Bun 1.x, TypeScript strict, NestJS, PostgreSQL, AWS SQS via LocalStack/MiniStack, Docker Compose e migrations versionadas e reversíveis; MikroORM preferido ou TypeORM. NÃO usar Java/Spring, Prisma, dinheiro em number/float/double, cache in-memory como garantia de idempotência, nem publicar eventos antes do commit. Garantir atomicidade financeira com wallet, ledger, inbox (quando SQS), outbox; constraints SQL para unicidade, não-negatividade e imutabilidade; lock por wallet, nunca global. Tratar duplicados, entrega fora de ordem e concorrência de >=3 instâncias. Testes reais e documentação das decisões em ARCHITECTURE.md. Autenticação pode ser adiada conforme README se documentada. Não usar regras de Estapar, Jira ou OSZ. Antes de escrever código de produção, solicitar aprovação do plano/fatia. Não fazer commits/push sem ordem explícita. Não afirmar teste bem-sucedido sem executá-lo. Não substituir artefatos existentes sem analisar diferenças.
