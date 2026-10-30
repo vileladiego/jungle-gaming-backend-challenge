@@ -15,6 +15,15 @@ import {
 } from '../domain/wager/wager-transaction';
 import { openWallet } from '../domain/wallet/open-wallet';
 import { Wallet } from '../domain/wallet/wallet';
+import {
+  backoffDelayMs,
+  claimLeaseMs,
+  outboxBackoffBaseMs,
+  outboxBackoffCapMs,
+  pendingBackoffBaseMs,
+  pendingBackoffCapMs,
+  pendingMaxAttempts,
+} from '../config/async-config';
 import { classifyPostgresError, persistsAsFailed } from './postgres-error';
 import {
   InboxMessageRecord,
@@ -71,11 +80,21 @@ export type SubmitWagerPersistenceResult =
       transaction: WagerTransaction;
       wallet: Wallet | null;
       entry: WalletLedgerEntry | null;
+      inbox?: 'recorded' | 'duplicate';
     }
   | {
       outcome: 'conflict';
       failureCode: 'IDEMPOTENCY_PAYLOAD_MISMATCH' | 'IDEMPOTENCY_KEY_MISMATCH';
-    };
+      inbox?: 'mismatch';
+    }
+  | { outcome: 'duplicate' }
+  | { outcome: 'inbox-held' };
+
+export interface ClaimedOutbox {
+  eventId: string;
+  aggregateId: string;
+  body: string;
+}
 
 @Injectable()
 export class FinancialStore {
@@ -230,16 +249,31 @@ export class FinancialStore {
     }
     const decision = await readIdempotency(tx, command);
     if (decision.kind === 'replay') {
-      if ((await ensureInbox(tx, command)) === 'mismatch') {
-        return { outcome: 'conflict', failureCode: 'IDEMPOTENCY_PAYLOAD_MISMATCH' };
+      const inbox = await ensureInbox(tx, command);
+      const absorbed = absorbInbox(inbox, { transaction: decision.transaction, wallet });
+      if (absorbed !== null) {
+        return absorbed;
       }
-      return { outcome: 'replay', transaction: decision.transaction, wallet, entry: null };
+      return {
+        outcome: 'replay',
+        transaction: decision.transaction,
+        wallet,
+        entry: null,
+        ...(inbox === 'recorded' ? { inbox: 'recorded' as const } : {}),
+      };
     }
     if (decision.kind === 'conflict') {
+      const inbox = await ensureInbox(tx, command);
+      const absorbed = absorbInbox(inbox, null);
+      if (absorbed !== null) {
+        return absorbed;
+      }
       return decision.result;
     }
-    if ((await ensureInbox(tx, command)) === 'mismatch') {
-      return { outcome: 'conflict', failureCode: 'IDEMPOTENCY_PAYLOAD_MISMATCH' };
+    const inbox = await ensureInbox(tx, command);
+    const absorbed = absorbInbox(inbox, null);
+    if (absorbed !== null) {
+      return absorbed;
     }
     const transaction = WagerTransaction.create({
       id: command.id,
@@ -290,6 +324,7 @@ export class FinancialStore {
       transaction: applied.transaction,
       wallet: applied.wallet,
       entry: applied.entry,
+      ...(inbox === 'recorded' ? { inbox: 'recorded' as const } : {}),
     };
   }
 
@@ -339,13 +374,31 @@ export class FinancialStore {
       const wallet = await lockWallet(tx, command.walletId);
       const decision = await readIdempotency(tx, command);
       if (decision.kind === 'replay') {
-        if ((await ensureInbox(tx, command)) === 'mismatch') {
-          return { outcome: 'conflict', failureCode: 'IDEMPOTENCY_PAYLOAD_MISMATCH' };
+        const inbox = await ensureInbox(tx, command);
+        const absorbed = absorbInbox(inbox, { transaction: decision.transaction, wallet });
+        if (absorbed !== null) {
+          return absorbed;
         }
-        return { outcome: 'replay' as const, transaction: decision.transaction, wallet, entry: null };
+        return {
+          outcome: 'replay' as const,
+          transaction: decision.transaction,
+          wallet,
+          entry: null,
+          ...(inbox === 'recorded' ? { inbox: 'recorded' as const } : {}),
+        };
       }
       if (decision.kind === 'conflict') {
+        const inbox = await ensureInbox(tx, command);
+        const absorbed = absorbInbox(inbox, null);
+        if (absorbed !== null) {
+          return absorbed;
+        }
         return decision.result;
+      }
+      const inbox = await ensureInbox(tx, command);
+      const absorbed = absorbInbox(inbox, null);
+      if (absorbed !== null) {
+        return absorbed;
       }
       throw new Error('Persistence conflict could not be reread');
     });
@@ -365,16 +418,31 @@ export class FinancialStore {
         }
         const decision = await readIdempotency(tx, command);
         if (decision.kind === 'replay') {
-          if ((await ensureInbox(tx, command)) === 'mismatch') {
-            return { outcome: 'conflict', failureCode: 'IDEMPOTENCY_PAYLOAD_MISMATCH' };
+          const inbox = await ensureInbox(tx, command);
+          const absorbed = absorbInbox(inbox, { transaction: decision.transaction, wallet });
+          if (absorbed !== null) {
+            return absorbed;
           }
-          return { outcome: 'replay' as const, transaction: decision.transaction, wallet, entry: null };
+          return {
+            outcome: 'replay' as const,
+            transaction: decision.transaction,
+            wallet,
+            entry: null,
+            ...(inbox === 'recorded' ? { inbox: 'recorded' as const } : {}),
+          };
         }
         if (decision.kind === 'conflict') {
+          const inbox = await ensureInbox(tx, command);
+          const absorbed = absorbInbox(inbox, null);
+          if (absorbed !== null) {
+            return absorbed;
+          }
           return decision.result;
         }
-        if ((await ensureInbox(tx, command)) === 'mismatch') {
-          return { outcome: 'conflict', failureCode: 'IDEMPOTENCY_PAYLOAD_MISMATCH' };
+        const inbox = await ensureInbox(tx, command);
+        const absorbed = absorbInbox(inbox, null);
+        if (absorbed !== null) {
+          return absorbed;
         }
         const transaction = WagerTransaction.create(commandToCreate(command));
         transaction.reject(failureCode, command.now, wallet?.balance);
@@ -398,7 +466,13 @@ export class FinancialStore {
             },
           }),
         ]);
-        return { outcome: 'rejected' as const, transaction, wallet, entry: null };
+        return {
+          outcome: 'rejected' as const,
+          transaction,
+          wallet,
+          entry: null,
+          ...(inbox === 'recorded' ? { inbox: 'recorded' as const } : {}),
+        };
       });
     } catch (error) {
       const classified = classifyPostgresError(error);
@@ -424,15 +498,42 @@ export class FinancialStore {
         }
         const decision = await readIdempotency(tx, command);
         if (decision.kind === 'replay') {
-          return { outcome: 'replay' as const, transaction: decision.transaction, wallet, entry: null };
+          const inbox = await ensureInbox(tx, command);
+          const absorbed = absorbInbox(inbox, { transaction: decision.transaction, wallet });
+          if (absorbed !== null) {
+            return absorbed;
+          }
+          return {
+            outcome: 'replay' as const,
+            transaction: decision.transaction,
+            wallet,
+            entry: null,
+            ...(inbox === 'recorded' ? { inbox: 'recorded' as const } : {}),
+          };
         }
         if (decision.kind === 'conflict') {
+          const inbox = await ensureInbox(tx, command);
+          const absorbed = absorbInbox(inbox, null);
+          if (absorbed !== null) {
+            return absorbed;
+          }
           return decision.result;
+        }
+        const inbox = await ensureInbox(tx, command);
+        const absorbed = absorbInbox(inbox, null);
+        if (absorbed !== null) {
+          return absorbed;
         }
         const transaction = WagerTransaction.create(commandToCreate(command));
         transaction.fail('PERSISTENT_STATE_CORRUPT', command.now);
         await insertWager(tx, transaction);
-        return { outcome: 'failed' as const, transaction, wallet, entry: null };
+        return {
+          outcome: 'failed' as const,
+          transaction,
+          wallet,
+          entry: null,
+          ...(inbox === 'recorded' ? { inbox: 'recorded' as const } : {}),
+        };
       });
     } catch (error) {
       const classified = classifyPostgresError(error);
@@ -445,6 +546,210 @@ export class FinancialStore {
       }
       throw error;
     }
+  }
+
+  async recordIngressReject(messageId: string, failureCode: string, payloadHash: string | null): Promise<void> {
+    const em = this.orm.em.fork();
+    await em.insert(IngressRejectRecord, {
+      id: uuidV7(),
+      consumerName: CONSUMER_NAME,
+      messageId,
+      payloadHash,
+      failureCode,
+      receivedAt: new Date(),
+    });
+  }
+
+  async claimOutbox(): Promise<ClaimedOutbox | null> {
+    const em = this.orm.em.fork();
+    return em.transactional(async (tx) => {
+      await setLocalTimeouts(tx);
+      const rows = await tx.execute<Array<{ id: string; aggregate_id: string; payload: unknown }>>(
+        `with claimed as (
+           select id
+             from outbox_messages candidate
+            where published_at is null
+              and (next_attempt_at is null or next_attempt_at <= now())
+              and not exists (
+                select 1
+                  from outbox_messages older
+                 where older.aggregate_id = candidate.aggregate_id
+                   and older.published_at is null
+                   and (older.occurred_at, older.id) < (candidate.occurred_at, candidate.id)
+              )
+            order by occurred_at, id
+            for update skip locked
+            limit 1
+         )
+         update outbox_messages
+            set next_attempt_at = now() + (interval '1 millisecond' * ?)
+           from claimed
+          where outbox_messages.id = claimed.id
+         returning outbox_messages.id, outbox_messages.aggregate_id, outbox_messages.payload`,
+        [claimLeaseMs()],
+      );
+      const row = rows[0];
+      if (row === undefined) {
+        return null;
+      }
+      return {
+        eventId: row.id,
+        aggregateId: row.aggregate_id,
+        body: typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload),
+      };
+    });
+  }
+
+  async markOutboxPublished(eventId: string): Promise<void> {
+    const em = this.orm.em.fork();
+    await em.transactional(async (tx) => {
+      await setLocalTimeouts(tx);
+      await tx.execute(
+        `update outbox_messages
+            set published_at = now()
+          where id = ?
+            and published_at is null`,
+        [eventId],
+      );
+    });
+  }
+
+  async rescheduleOutbox(eventId: string): Promise<void> {
+    const em = this.orm.em.fork();
+    await em.transactional(async (tx) => {
+      await setLocalTimeouts(tx);
+      await tx.execute(
+        `update outbox_messages
+            set attempts = attempts + 1,
+                next_attempt_at = now() + (
+                  interval '1 millisecond' * least(?::numeric, ?::numeric * power(2, attempts))
+                )
+          where id = ?
+            and published_at is null`,
+        [outboxBackoffCapMs(), outboxBackoffBaseMs(), eventId],
+      );
+    });
+  }
+
+  async readOutboxLag(): Promise<{ count: number; lagSeconds: number }> {
+    const rows = await this.orm.em.fork().getConnection().execute<
+      Array<{ count: string; lag_seconds: string | null }>
+    >(
+      `select count(*)::text as count,
+              extract(epoch from (now() - min(occurred_at)))::text as lag_seconds
+         from outbox_messages
+        where published_at is null`,
+    );
+    const row = rows[0];
+    return {
+      count: Number(row?.count ?? '0'),
+      lagSeconds: row?.lag_seconds === null || row?.lag_seconds === undefined ? 0 : Number(row.lag_seconds),
+    };
+  }
+
+  async claimPendingReference(): Promise<string | null> {
+    const em = this.orm.em.fork();
+    return em.transactional(async (tx) => {
+      await setLocalTimeouts(tx);
+      const rows = await tx.execute<Array<{ id: string }>>(
+        `with claimed as (
+           select id
+             from wager_transactions
+            where status = 'PENDING_REFERENCE'
+              and next_attempt_at <= now()
+            order by next_attempt_at, id
+            for update skip locked
+            limit 1
+         )
+         update wager_transactions
+            set next_attempt_at = now() + (interval '1 millisecond' * ?)
+           from claimed
+          where wager_transactions.id = claimed.id
+         returning wager_transactions.id`,
+        [claimLeaseMs()],
+      );
+      return rows[0]?.id ?? null;
+    });
+  }
+
+  async resolvePendingReference(id: string): Promise<'resolved' | 'waiting' | 'rejected' | 'skipped'> {
+    const em = this.orm.em.fork();
+    return em.transactional(async (tx) => {
+      await setLocalTimeouts(tx);
+      const loaded = await tx.findOne(WagerTransactionRecord, { id });
+      if (loaded === null || loaded.status !== 'PENDING_REFERENCE') {
+        return 'skipped';
+      }
+      const walletId = loaded.walletId;
+      let wallet = await lockWallet(tx, walletId);
+      if (wallet === null) {
+        wallet = await lockWallet(tx, walletId);
+      }
+      const again = await tx.findOne(WagerTransactionRecord, { id });
+      if (again === null || again.status !== 'PENDING_REFERENCE') {
+        return 'skipped';
+      }
+      const transaction = wagerFrom(again);
+      const clock = await postgresNow(tx);
+      const reference =
+        transaction.referenceExternalTransactionId === undefined
+          ? null
+          : await findByPair(tx, transaction.providerId, transaction.referenceExternalTransactionId);
+      const processedReversal = reference === null ? null : await findProcessedReversal(tx, reference.id);
+      const versionBefore = wallet?.version;
+      const applied = applyWager({
+        transaction,
+        wallet,
+        reference,
+        processedReversal,
+        now: clock,
+        deadlineAt: transaction.deadlineAt ?? clock,
+        entryId: uuidV7(),
+        correlationId: uuidV7(),
+        nextEventId: () => uuidV7(),
+      });
+      if (applied.transaction.status === 'PENDING_REFERENCE') {
+        const deadline = transaction.deadlineAt;
+        const exhausted =
+          transaction.attemptCount >= pendingMaxAttempts() ||
+          (deadline !== undefined && clock.getTime() >= deadline.getTime());
+        if (exhausted) {
+          const code = reference === null ? 'REFERENCE_NOT_FOUND' : 'REFERENCE_NOT_PROCESSED';
+          applied.transaction.reject(code, clock, wallet?.balance);
+          await persistResolution(tx, applied, versionBefore, [
+            WagerTransactionRejected.create({
+              eventId: uuidV7(),
+              aggregateId: transaction.walletId,
+              correlationId: uuidV7(),
+              causationId: transaction.id,
+              occurredAt: clock,
+              data: {
+                transactionId: transaction.id,
+                walletId: transaction.walletId,
+                playerId: transaction.playerId,
+                providerId: transaction.providerId,
+                kind: transaction.kind,
+                failureCode: code,
+                money: transaction.money.toJSON(),
+                observedBalance: wallet?.balance.toJSON(),
+              },
+            }),
+          ]);
+          return 'rejected';
+        }
+        const delay = backoffDelayMs(
+          transaction.attemptCount + 1,
+          pendingBackoffBaseMs(),
+          pendingBackoffCapMs(),
+        );
+        const nextAttemptAt = await addMilliseconds(tx, delay);
+        applied.transaction.recordUnresolvedAttempt(nextAttemptAt);
+        await updateWager(tx, applied.transaction);
+        return 'waiting';
+      }
+      await persistResolution(tx, applied, versionBefore, applied.events);
+      return applied.transaction.status === 'REJECTED' ? 'rejected' : 'resolved';
+    });
   }
 }
 
@@ -666,27 +971,32 @@ async function insertEvents(em: EntityManager, events: readonly IntegrationEvent
   }
 }
 
-async function ensureInbox(em: EntityManager, command: SubmitWagerCommand): Promise<'ok' | 'mismatch'> {
+type InboxDisposition = 'absent' | 'recorded' | 'duplicate' | 'pending' | 'mismatch';
+
+async function ensureInbox(em: EntityManager, command: SubmitWagerCommand): Promise<InboxDisposition> {
   if (command.inbox === undefined) {
-    return 'ok';
+    return 'absent';
   }
   const existing = await em.findOne(InboxMessageRecord, {
     consumerName: CONSUMER_NAME,
     messageId: command.inbox.messageId,
   });
   if (existing !== null) {
-    if (existing.payloadHash === command.inbox.payloadHash) {
-      return 'ok';
+    if (existing.payloadHash !== command.inbox.payloadHash) {
+      await em.insert(IngressRejectRecord, {
+        id: uuidV7(),
+        consumerName: CONSUMER_NAME,
+        messageId: command.inbox.messageId,
+        payloadHash: command.inbox.payloadHash,
+        failureCode: 'IDEMPOTENCY_PAYLOAD_MISMATCH',
+        receivedAt: command.now,
+      });
+      return 'mismatch';
     }
-    await em.insert(IngressRejectRecord, {
-      id: uuidV7(),
-      consumerName: CONSUMER_NAME,
-      messageId: command.inbox.messageId,
-      payloadHash: command.inbox.payloadHash,
-      failureCode: 'IDEMPOTENCY_PAYLOAD_MISMATCH',
-      receivedAt: command.now,
-    });
-    return 'mismatch';
+    if (existing.processedAt === null) {
+      return 'pending';
+    }
+    return 'duplicate';
   }
   await em.insert(InboxMessageRecord, {
     consumerName: CONSUMER_NAME,
@@ -695,7 +1005,91 @@ async function ensureInbox(em: EntityManager, command: SubmitWagerCommand): Prom
     receivedAt: command.now,
     processedAt: command.now,
   });
-  return 'ok';
+  return 'recorded';
+}
+
+function absorbInbox(
+  status: InboxDisposition,
+  replay: { transaction: WagerTransaction; wallet: Wallet | null } | null,
+): SubmitWagerPersistenceResult | null {
+  if (status === 'mismatch') {
+    return { outcome: 'conflict', failureCode: 'IDEMPOTENCY_PAYLOAD_MISMATCH', inbox: 'mismatch' };
+  }
+  if (status === 'pending') {
+    return { outcome: 'inbox-held' };
+  }
+  if (status === 'duplicate') {
+    if (replay === null) {
+      return { outcome: 'duplicate' };
+    }
+    return {
+      outcome: 'replay',
+      transaction: replay.transaction,
+      wallet: replay.wallet,
+      entry: null,
+      inbox: 'duplicate',
+    };
+  }
+  return null;
+}
+
+async function postgresNow(em: EntityManager): Promise<Date> {
+  const rows = await em.execute<Array<{ now: Date | string }>>(`select now() as now`);
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error('PostgreSQL did not return a clock');
+  }
+  return asDate(row.now);
+}
+
+async function addMilliseconds(em: EntityManager, delayMs: number): Promise<Date> {
+  const rows = await em.execute<Array<{ next_attempt_at: Date | string }>>(
+    `select now() + (interval '1 millisecond' * ?) as next_attempt_at`,
+    [delayMs],
+  );
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error('PostgreSQL did not return a clock');
+  }
+  return asDate(row.next_attempt_at);
+}
+
+async function persistResolution(
+  em: EntityManager,
+  applied: { transaction: WagerTransaction; wallet: Wallet | null; entry: WalletLedgerEntry | null },
+  versionBefore: number | undefined,
+  events: readonly IntegrationEvent<unknown>[],
+): Promise<void> {
+  if (applied.entry !== null) {
+    await insertLedger(em, applied.entry);
+  }
+  if (applied.wallet !== null && versionBefore !== undefined && applied.wallet.version !== versionBefore) {
+    await updateWallet(em, applied.wallet, versionBefore);
+  }
+  await updateWager(em, applied.transaction);
+  await insertEvents(em, events);
+}
+
+async function updateWager(em: EntityManager, transaction: WagerTransaction): Promise<void> {
+  const state = transaction.toState();
+  const affected = await em.nativeUpdate(
+    WagerTransactionRecord,
+    { id: state.id },
+    {
+      referenceTransactionId: state.referenceTransactionId ?? null,
+      status: state.status,
+      failureCode: state.failureCode ?? null,
+      processedAt: state.processedAt ?? null,
+      observedBalanceAmount: state.observedBalance?.amount ?? null,
+      observedBalanceCurrency: state.observedBalance?.currency ?? null,
+      attemptCount: state.attemptCount,
+      nextAttemptAt: state.nextAttemptAt ?? null,
+      deadlineAt: state.deadlineAt ?? null,
+    },
+  );
+  if (affected !== 1) {
+    throw new Error('Pending wager was not updated');
+  }
 }
 
 function walletFrom(record: WalletRecord): Wallet {

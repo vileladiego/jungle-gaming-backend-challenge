@@ -6,6 +6,7 @@
     "lint": "eslint src test scripts",
     "test": "bun test",
     "start": "bun src/main.ts",
+    "worker": "bun src/worker-main.ts",
     "migration:up": "bun ./node_modules/@mikro-orm/cli/cli.js migration:up",
     "migration:down": "bun ./node_modules/@mikro-orm/cli/cli.js migration:down",
     "queues:up": "bun scripts/create-queues.ts",

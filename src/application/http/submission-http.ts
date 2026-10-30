@@ -6,6 +6,9 @@ export interface HttpResult {
 }
 
 export function submissionHttp(result: SubmitWagerPersistenceResult): HttpResult {
+  if (result.outcome === 'duplicate' || result.outcome === 'inbox-held') {
+    throw new Error('Inbox disposition is not an HTTP result');
+  }
   if (result.outcome === 'conflict') {
     return { status: 409, body: { failureCode: result.failureCode } };
   }

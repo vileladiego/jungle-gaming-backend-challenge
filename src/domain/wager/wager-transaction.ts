@@ -268,6 +268,16 @@ export class WagerTransaction {
     this.#deadlineAt = new Date(deadlineAt.getTime());
   }
 
+  /**
+   * Uma resolução que continua esperando a referência.
+   * Não mexe no prazo final nem no snapshot.
+   */
+  recordUnresolvedAttempt(nextAttemptAt: Date): void {
+    this.assertStatus('PENDING_REFERENCE');
+    this.#attemptCount += 1;
+    this.#nextAttemptAt = new Date(nextAttemptAt.getTime());
+  }
+
   reject(code: FailureCode, at: Date, observedBalance?: Money): void {
     this.assertOpen();
     if (!isPersistedRejection(code)) {

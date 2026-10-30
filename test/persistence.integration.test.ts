@@ -499,18 +499,28 @@ describe('Fase 3', () => {
     ]);
     expect(replayed[0]?.outcome).toBe('replay');
     expect(replayed[1]?.outcome).toBe('replay');
+    const replayLeft = replayed[0];
+    const replayRight = replayed[1];
+    const firstResult = results[0];
+    const secondResult = results[1];
     if (
-      replayed[0]?.outcome === 'replay' &&
-      replayed[1]?.outcome === 'replay' &&
-      results[0]?.outcome !== 'conflict' &&
-      results[1]?.outcome !== 'conflict'
+      replayLeft?.outcome === 'replay' &&
+      replayRight?.outcome === 'replay' &&
+      firstResult !== undefined &&
+      secondResult !== undefined &&
+      firstResult.outcome !== 'conflict' &&
+      secondResult.outcome !== 'conflict' &&
+      firstResult.outcome !== 'duplicate' &&
+      firstResult.outcome !== 'inbox-held' &&
+      secondResult.outcome !== 'duplicate' &&
+      secondResult.outcome !== 'inbox-held'
     ) {
-      expect(replayed[0].transaction.status).toBe(results[0].transaction.status);
-      expect(replayed[1].transaction.status).toBe(results[1].transaction.status);
-      expect(replayed[0].transaction.observedBalance?.toJSON().amount).toBe(
-        results[0].transaction.observedBalance?.toJSON().amount,
+      expect(replayLeft.transaction.status).toBe(firstResult.transaction.status);
+      expect(replayRight.transaction.status).toBe(secondResult.transaction.status);
+      expect(replayLeft.transaction.observedBalance?.toJSON().amount).toBe(
+        firstResult.transaction.observedBalance?.toJSON().amount,
       );
-      expect(replayed[1].transaction.failureCode).toBe(results[1].transaction.failureCode);
+      expect(replayRight.transaction.failureCode).toBe(secondResult.transaction.failureCode);
     }
     const afterReplay = await appQuery<{ direction: string; amount: string }>(
       `select direction, amount::text as amount

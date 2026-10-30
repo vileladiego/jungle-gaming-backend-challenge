@@ -34,7 +34,7 @@ Replay devolve o snapshot já gravado. Não insere outro ledger nem outra outbox
 
 O ciclo evitado é travar a wallet e depois a transação numa sessão, e a transação e depois a wallet em outra. A transação financeira trava a wallet primeiro e não trava linhas de inbox ou outbox com `FOR UPDATE`.
 
-O worker de referência, quando existir, faz `SKIP LOCKED` só na linha `PENDING_REFERENCE`, confirma o lease e encerra essa transação sem a wallet. Uma transação nova então segue a ordem acima. O publisher, quando existir, faz `SKIP LOCKED` só na outbox e não toca a wallet.
+O worker de referência faz `SKIP LOCKED` só na linha `PENDING_REFERENCE`, grava o lease em `next_attempt_at` e encerra essa transação sem a wallet. Uma transação nova então trava a wallet e relê o status. O publisher faz `SKIP LOCKED` só na outbox, commita o lease e só então envia. `published_at` entra depois do envio confirmado. A linha publicada permanece.
 
 Três instâncias na mesma wallet esperam o `FOR UPDATE`. O timeout é transitório. Não há lock global.
 
