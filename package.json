@@ -3,10 +3,11 @@
   "private": true,
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "lint": "eslint src test scripts",
+    "lint": "eslint src test scripts distributed",
     "test": "bun test",
     "start": "bun src/main.ts",
     "worker": "bun src/worker-main.ts",
+    "test:distributed": "bun test ./distributed/concurrency.suite.ts",
     "migration:up": "bun ./node_modules/@mikro-orm/cli/cli.js migration:up",
     "migration:down": "bun ./node_modules/@mikro-orm/cli/cli.js migration:down",
     "queues:up": "bun scripts/create-queues.ts",
